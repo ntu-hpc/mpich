@@ -139,6 +139,16 @@
 #define MPI_File_get_atomicity PMPI_File_get_atomicity
 #undef MPI_File_sync
 #define MPI_File_sync PMPI_File_sync
+#undef MPI_File_sync_to
+#define MPI_File_sync_to PMPI_File_sync_to
+#undef MPI_File_sync_from
+#define MPI_File_sync_from PMPI_File_sync_from
+#undef MPI_File_sync_group
+#define MPI_File_sync_group PMPI_File_sync_group
+#undef MPI_File_release
+#define MPI_File_release PMPI_File_release
+#undef MPI_File_acquire
+#define MPI_File_acquire PMPI_File_acquire
 
 #undef MPI_Type_create_subarray
 #define MPI_Type_create_subarray PMPI_Type_create_subarray

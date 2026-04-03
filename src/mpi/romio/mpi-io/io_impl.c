@@ -1145,6 +1145,275 @@ int MPIR_File_sync_impl(MPI_File fh)
     goto fn_exit;
 }
 
+/* P1: Directed sync -- writer side.
+ *
+ * Formally establishes the sw_pair^{p->q} synchronizes-with edge.
+ * Sequence: ADIO_Flush (fsync to storage) then MPI_Send (token to target).
+ * The MPI_Send creates a happens-before ordering between the flush and the
+ * matching MPI_Recv in MPIR_File_sync_from_impl.
+ */
+int MPIR_File_sync_to_impl(MPI_File fh, int target_rank, MPI_Comm comm)
+{
+    int error_code = MPI_SUCCESS;
+
+    ADIO_File adio_fh = MPIO_File_resolve(fh);
+    MPIO_CHECK_FILE_HANDLE(adio_fh, __func__, error_code);
+
+    if ((adio_fh == NULL) || ((adio_fh)->cookie != ADIOI_FILE_COOKIE)) {
+        error_code = MPIO_Err_create_code(MPI_SUCCESS, MPIR_ERR_RECOVERABLE,
+                                          __func__, __LINE__, MPI_ERR_ARG, "**iobadfh", 0);
+        goto fn_fail;
+    }
+
+    MPIO_CHECK_WRITABLE(fh, __func__, error_code);
+
+    /* Flush dirty writes to storage -- this is the "release" of the write phase */
+    ADIO_Flush(adio_fh, &error_code);
+    if (error_code != MPI_SUCCESS)
+        goto fn_fail;
+
+    /* Signal the target that the flush is complete.  This zero-byte send
+     * establishes happens-before between the flush above and the matching
+     * MPI_Recv in sync_from, completing the sw_pair edge. */
+    error_code = MPI_Send(NULL, 0, MPI_BYTE, target_rank, ADIOI_SYNC_TO_TAG, comm);
+
+  fn_exit:
+    return error_code;
+  fn_fail:
+    goto fn_exit;
+}
+
+/* P1: Directed sync -- reader side.
+ *
+ * Formally completes the sw_pair^{p->q} synchronizes-with edge.
+ * Sequence: MPI_Recv (wait for producer's token) then ADIO_Flush (no-op if
+ * this process has no dirty writes, but ensures ROMIO's internal state is
+ * consistent before subsequent reads).
+ */
+int MPIR_File_sync_from_impl(MPI_File fh, int source_rank, MPI_Comm comm)
+{
+    int error_code = MPI_SUCCESS;
+    MPI_Status status;
+
+    ADIO_File adio_fh = MPIO_File_resolve(fh);
+    MPIO_CHECK_FILE_HANDLE(adio_fh, __func__, error_code);
+
+    if ((adio_fh == NULL) || ((adio_fh)->cookie != ADIOI_FILE_COOKIE)) {
+        error_code = MPIO_Err_create_code(MPI_SUCCESS, MPIR_ERR_RECOVERABLE,
+                                          __func__, __LINE__, MPI_ERR_ARG, "**iobadfh", 0);
+        goto fn_fail;
+    }
+
+    /* Wait for the producer to signal that its flush is complete.
+     * After this Recv returns, all writes by source_rank that preceded its
+     * sync_to are durable in storage and visible to subsequent reads here. */
+    error_code = MPI_Recv(NULL, 0, MPI_BYTE, source_rank, ADIOI_SYNC_TO_TAG, comm, &status);
+    if (error_code != MPI_SUCCESS)
+        goto fn_fail;
+
+    /* Flush this process's own dirty writes (if any) and let ROMIO reset
+     * its internal dirty_write flag.  On a read-only handle this is a no-op. */
+    ADIO_Flush(adio_fh, &error_code);
+
+  fn_exit:
+    return error_code;
+  fn_fail:
+    goto fn_exit;
+}
+
+/* P2: Group sync.
+ *
+ * Formally establishes sw_G between all pairs in G, achieving C2 for G.
+ * Sequence: ADIO_Flush -> MPI_Barrier(subcomm) -> ADIO_Flush.
+ * This is exactly sync-barrier-sync restricted to G instead of the full
+ * file communicator, so processes outside G are never blocked.
+ *
+ * MPI_Comm_create_group is MPI-3.0 and only requires processes in the group
+ * to participate, making it safe to call without involving non-G processes.
+ */
+int MPIR_File_sync_group_impl(MPI_File fh, MPI_Group group)
+{
+    int error_code = MPI_SUCCESS;
+    MPI_Comm subcomm = MPI_COMM_NULL;
+
+    ADIO_File adio_fh = MPIO_File_resolve(fh);
+    MPIO_CHECK_FILE_HANDLE(adio_fh, __func__, error_code);
+
+    if ((adio_fh == NULL) || ((adio_fh)->cookie != ADIOI_FILE_COOKIE)) {
+        error_code = MPIO_Err_create_code(MPI_SUCCESS, MPIR_ERR_RECOVERABLE,
+                                          __func__, __LINE__, MPI_ERR_ARG, "**iobadfh", 0);
+        goto fn_fail;
+    }
+
+    /* Step 1: flush this process's dirty writes to storage before the barrier
+     * so that peers can read them after the barrier completes. */
+    ADIO_Flush(adio_fh, &error_code);
+    if (error_code != MPI_SUCCESS)
+        goto fn_fail;
+
+    /* Step 2: create a sub-communicator spanning exactly G so that the barrier
+     * below does not involve processes outside G.  MPI_Comm_create_group only
+     * requires participation from processes in the group. */
+    error_code = MPI_Comm_create_group(adio_fh->comm, group, ADIOI_SYNC_GROUP_TAG, &subcomm);
+    if (error_code != MPI_SUCCESS)
+        goto fn_fail;
+
+    /* Step 3: barrier within G -- establishes the all-pairs sw_G edges */
+    error_code = MPI_Barrier(subcomm);
+    if (error_code != MPI_SUCCESS)
+        goto fn_cleanup;
+
+    /* Step 4: second flush -- now that all peers have completed their flush
+     * and the barrier has ordered them, reset ROMIO's internal state so
+     * subsequent reads see the peers' data. */
+    ADIO_Flush(adio_fh, &error_code);
+
+  fn_cleanup:
+    MPI_Comm_free(&subcomm);
+  fn_exit:
+    return error_code;
+  fn_fail:
+    goto fn_exit;
+}
+
+/* P3: Release-acquire sync -- writer side.
+ *
+ * Establishes sw_ra^{p -> p'} for every p' in readers.
+ * Sequence: ADIO_Flush then MPI_Isend(token) to each reader, Waitall.
+ *
+ * Rank translation: writers/readers are subgroups of adio_fh->comm.
+ * We obtain the file communicator's group once, batch-translate all
+ * reader ranks into file-communicator rank space, then free the group.
+ */
+int MPIR_File_release_impl(MPI_File fh, MPI_Group writers, MPI_Group readers)
+{
+    int error_code = MPI_SUCCESS;
+    int nreaders, i;
+    int *grp_ranks = NULL, *comm_ranks = NULL;
+    MPI_Request *reqs = NULL;
+    MPI_Group comm_group = MPI_GROUP_NULL;
+
+    ADIO_File adio_fh = MPIO_File_resolve(fh);
+    MPIO_CHECK_FILE_HANDLE(adio_fh, __func__, error_code);
+
+    if ((adio_fh == NULL) || ((adio_fh)->cookie != ADIOI_FILE_COOKIE)) {
+        error_code = MPIO_Err_create_code(MPI_SUCCESS, MPIR_ERR_RECOVERABLE,
+                                          __func__, __LINE__, MPI_ERR_ARG, "**iobadfh", 0);
+        goto fn_fail;
+    }
+
+    MPIO_CHECK_WRITABLE(fh, __func__, error_code);
+
+    /* Flush this writer's dirty data to storage before signalling readers. */
+    ADIO_Flush(adio_fh, &error_code);
+    if (error_code != MPI_SUCCESS)
+        goto fn_fail;
+
+    MPI_Group_size(readers, &nreaders);
+    if (nreaders == 0)
+        goto fn_exit;
+
+    /* Translate reader ranks from their group into adio_fh->comm rank space. */
+    grp_ranks  = (int *) ADIOI_Malloc(nreaders * sizeof(int));
+    comm_ranks = (int *) ADIOI_Malloc(nreaders * sizeof(int));
+    reqs       = (MPI_Request *) ADIOI_Malloc(nreaders * sizeof(MPI_Request));
+
+    for (i = 0; i < nreaders; i++)
+        grp_ranks[i] = i;
+
+    MPI_Comm_group(adio_fh->comm, &comm_group);
+    MPI_Group_translate_ranks(readers, nreaders, grp_ranks, comm_group, comm_ranks);
+    MPI_Group_free(&comm_group);
+
+    /* Send a zero-byte token to each reader.  Each send establishes one
+     * sw_ra edge once matched by the corresponding MPI_Irecv in acquire. */
+    for (i = 0; i < nreaders; i++) {
+        error_code = MPI_Isend(NULL, 0, MPI_BYTE, comm_ranks[i],
+                               ADIOI_SYNC_RA_TAG, adio_fh->comm, &reqs[i]);
+        if (error_code != MPI_SUCCESS)
+            goto fn_cleanup;
+    }
+
+    error_code = MPI_Waitall(nreaders, reqs, MPI_STATUSES_IGNORE);
+
+  fn_cleanup:
+    ADIOI_Free(grp_ranks);
+    ADIOI_Free(comm_ranks);
+    ADIOI_Free(reqs);
+  fn_exit:
+    return error_code;
+  fn_fail:
+    goto fn_exit;
+}
+
+/* P3: Release-acquire sync -- reader side.
+ *
+ * Completes sw_ra^{p -> p'} for every p in writers.
+ * Sequence: MPI_Irecv(token) from each writer, Waitall, then ADIO_Flush.
+ */
+int MPIR_File_acquire_impl(MPI_File fh, MPI_Group writers, MPI_Group readers)
+{
+    int error_code = MPI_SUCCESS;
+    int nwriters, i;
+    int *grp_ranks = NULL, *comm_ranks = NULL;
+    MPI_Request *reqs = NULL;
+    MPI_Group comm_group = MPI_GROUP_NULL;
+
+    ADIO_File adio_fh = MPIO_File_resolve(fh);
+    MPIO_CHECK_FILE_HANDLE(adio_fh, __func__, error_code);
+
+    if ((adio_fh == NULL) || ((adio_fh)->cookie != ADIOI_FILE_COOKIE)) {
+        error_code = MPIO_Err_create_code(MPI_SUCCESS, MPIR_ERR_RECOVERABLE,
+                                          __func__, __LINE__, MPI_ERR_ARG, "**iobadfh", 0);
+        goto fn_fail;
+    }
+
+    MPI_Group_size(writers, &nwriters);
+    if (nwriters == 0)
+        goto fn_flush;
+
+    /* Translate writer ranks from their group into adio_fh->comm rank space. */
+    grp_ranks  = (int *) ADIOI_Malloc(nwriters * sizeof(int));
+    comm_ranks = (int *) ADIOI_Malloc(nwriters * sizeof(int));
+    reqs       = (MPI_Request *) ADIOI_Malloc(nwriters * sizeof(MPI_Request));
+
+    for (i = 0; i < nwriters; i++)
+        grp_ranks[i] = i;
+
+    MPI_Comm_group(adio_fh->comm, &comm_group);
+    MPI_Group_translate_ranks(writers, nwriters, grp_ranks, comm_group, comm_ranks);
+    MPI_Group_free(&comm_group);
+
+    /* Post a receive for each writer's token.  After Waitall, every writer
+     * has completed its ADIO_Flush, so all their writes are durable. */
+    for (i = 0; i < nwriters; i++) {
+        error_code = MPI_Irecv(NULL, 0, MPI_BYTE, comm_ranks[i],
+                               ADIOI_SYNC_RA_TAG, adio_fh->comm, &reqs[i]);
+        if (error_code != MPI_SUCCESS)
+            goto fn_cleanup;
+    }
+
+    error_code = MPI_Waitall(nwriters, reqs, MPI_STATUSES_IGNORE);
+    if (error_code != MPI_SUCCESS)
+        goto fn_cleanup;
+
+  fn_cleanup:
+    ADIOI_Free(grp_ranks);
+    ADIOI_Free(comm_ranks);
+    ADIOI_Free(reqs);
+    if (error_code != MPI_SUCCESS)
+        goto fn_fail;
+
+  fn_flush:
+    /* Reset ROMIO's internal state so subsequent reads see writers' data. */
+    ADIO_Flush(adio_fh, &error_code);
+
+  fn_exit:
+    return error_code;
+  fn_fail:
+    goto fn_exit;
+}
+
 int MPIR_File_write_impl(MPI_File fh, const void *buf, MPI_Aint count, MPI_Datatype datatype,
                          MPI_Status * status)
 {

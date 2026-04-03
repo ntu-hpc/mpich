@@ -155,6 +155,21 @@ int MPIR_File_set_size_impl(MPI_File fh, MPI_Offset size);
 int MPIR_File_set_view_impl(MPI_File fh, MPI_Offset disp, MPI_Datatype etype, MPI_Datatype filetype,
                             const char *datarep, MPI_Info info);
 int MPIR_File_sync_impl(MPI_File fh);
+/* P1: directed sync (process-pair consistency, C1 level) */
+int MPIR_File_sync_to_impl(MPI_File fh, int target_rank, MPI_Comm comm);
+int MPIR_File_sync_from_impl(MPI_File fh, int source_rank, MPI_Comm comm);
+/* P2: group sync (group consistency, C2 level) */
+int MPIR_File_sync_group_impl(MPI_File fh, MPI_Group group);
+/* P3: release-acquire sync (asymmetric writer->reader C2) */
+int MPIR_File_release_impl(MPI_File fh, MPI_Group writers, MPI_Group readers);
+int MPIR_File_acquire_impl(MPI_File fh, MPI_Group writers, MPI_Group readers);
+
+/* Private tags used by the directed/group/release-acquire sync primitives.
+ * A production implementation should allocate these from MPICH's internal
+ * tag pool; for this prototype fixed values in the valid tag range are used. */
+#define ADIOI_SYNC_TO_TAG    17
+#define ADIOI_SYNC_GROUP_TAG 18
+#define ADIOI_SYNC_RA_TAG    19
 int MPIR_File_write_impl(MPI_File fh, const void *buf, MPI_Aint count, MPI_Datatype datatype,
                          MPI_Status * status);
 int MPIR_File_write_all_impl(MPI_File fh, const void *buf, MPI_Aint count, MPI_Datatype datatype,

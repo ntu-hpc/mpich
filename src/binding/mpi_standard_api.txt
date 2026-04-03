@@ -2782,3 +2782,24 @@ MPI_Wtick:
     .return: TICK_RESOLUTION
 MPI_Wtime:
     .return: WALL_TIME
+
+# Prototype sync primitives (formal MPI-IO consistency model)
+MPI_File_sync_to:
+    fh: FILE, [file handle]
+    target_rank: RANK_NNI, [rank of target process in comm]
+    comm: COMMUNICATOR, [communicator]
+MPI_File_sync_from:
+    fh: FILE, [file handle]
+    source_rank: RANK_NNI, [rank of source process in comm]
+    comm: COMMUNICATOR, [communicator]
+MPI_File_sync_group:
+    fh: FILE, [file handle]
+    group: GROUP, [group of processes participating in the sync]
+MPI_File_release:
+    fh: FILE, [file handle]
+    writers: GROUP, [group of writer processes]
+    readers: GROUP, [group of reader processes]
+MPI_File_acquire:
+    fh: FILE, [file handle]
+    writers: GROUP, [group of writer processes]
+    readers: GROUP, [group of reader processes]

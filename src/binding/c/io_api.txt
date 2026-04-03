@@ -61,6 +61,21 @@ MPI_File_delete:
 MPI_File_sync:
     .desc: Causes all previous writes to be transferred
 
+MPI_File_sync_to:
+    .desc: Directed sync from writer to a specific reader (P1 primitive)
+
+MPI_File_sync_from:
+    .desc: Directed sync receive from a specific writer (P1 primitive)
+
+MPI_File_sync_group:
+    .desc: Group barrier sync for a subset of processes (P2 primitive)
+
+MPI_File_release:
+    .desc: Release-side of release-acquire sync from writers to readers (P3 primitive)
+
+MPI_File_acquire:
+    .desc: Acquire-side of release-acquire sync from writers to readers (P3 primitive)
+
 MPI_File_get_amode:
     .desc: Returns the file access mode
     .skip: global_cs
