@@ -10501,16 +10501,6 @@ static int internal_File_sync_to(MPI_File fh, int target_rank, MPI_Comm comm)
     MPIR_Ext_cs_enter();
     MPIR_FUNC_TERSE_ENTER;
 
-#ifdef HAVE_ERROR_CHECKING
-    {
-        MPID_BEGIN_ERROR_CHECKS;
-        {
-            MPIR_ERRTEST_SEND_RANK(comm_ptr, target_rank, mpi_errno);
-        }
-        MPID_END_ERROR_CHECKS;
-    }
-#endif /* HAVE_ERROR_CHECKING */
-
     /* ... body of routine ... */
 #ifndef HAVE_ROMIO
     mpi_errno = MPIR_Err_create_code(mpi_errno, MPIR_ERR_RECOVERABLE, __func__, __LINE__, MPI_ERR_OTHER, "**notimpl", 0);
@@ -10536,7 +10526,7 @@ static int internal_File_sync_to(MPI_File fh, int target_rank, MPI_Comm comm)
                                      "**mpi_file_sync_to", "**mpi_file_sync_to %F %d %C", fh,
                                      target_rank, comm);
 #endif
-    mpi_errno = MPIR_Err_return_comm(comm_ptr, __func__, mpi_errno);
+    mpi_errno = MPIO_Err_return_file(fh, mpi_errno);
     /* --END ERROR HANDLING-- */
     goto fn_exit;
 }
@@ -10601,16 +10591,6 @@ static int internal_File_sync_from(MPI_File fh, int source_rank, MPI_Comm comm)
     MPIR_Ext_cs_enter();
     MPIR_FUNC_TERSE_ENTER;
 
-#ifdef HAVE_ERROR_CHECKING
-    {
-        MPID_BEGIN_ERROR_CHECKS;
-        {
-            MPIR_ERRTEST_RANK(comm_ptr, source_rank, mpi_errno);
-        }
-        MPID_END_ERROR_CHECKS;
-    }
-#endif /* HAVE_ERROR_CHECKING */
-
     /* ... body of routine ... */
 #ifndef HAVE_ROMIO
     mpi_errno = MPIR_Err_create_code(mpi_errno, MPIR_ERR_RECOVERABLE, __func__, __LINE__, MPI_ERR_OTHER, "**notimpl", 0);
@@ -10636,7 +10616,7 @@ static int internal_File_sync_from(MPI_File fh, int source_rank, MPI_Comm comm)
                                      "**mpi_file_sync_from", "**mpi_file_sync_from %F %d %C", fh,
                                      source_rank, comm);
 #endif
-    mpi_errno = MPIR_Err_return_comm(comm_ptr, __func__, mpi_errno);
+    mpi_errno = MPIO_Err_return_file(fh, mpi_errno);
     /* --END ERROR HANDLING-- */
     goto fn_exit;
 }

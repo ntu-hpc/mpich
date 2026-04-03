@@ -63,9 +63,11 @@ MPI_File_sync:
 
 MPI_File_sync_to:
     .desc: Directed sync from writer to a specific reader (P1 primitive)
+    .skip: validate-target_rank
 
 MPI_File_sync_from:
     .desc: Directed sync receive from a specific writer (P1 primitive)
+    .skip: validate-source_rank
 
 MPI_File_sync_group:
     .desc: Group barrier sync for a subset of processes (P2 primitive)
