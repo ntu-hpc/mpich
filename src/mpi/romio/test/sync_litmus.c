@@ -268,8 +268,9 @@ static int t2_run(const char *filename, int sync_mode)
             }
         }
 
-        if (sync_mode == 0)
-            MPI_Barrier(MPI_COMM_WORLD);
+        /* End-of-iteration barrier: prevents in-G processes from starting the
+         * next write before all peers have finished reading this iteration. */
+        MPI_CHECK(MPI_Barrier(MPI_COMM_WORLD));
     }
 
     MPI_Group_free(&g_group);
@@ -349,8 +350,10 @@ static int t3_run(const char *filename, int sync_mode)
             }
         }
 
-        if (sync_mode == 0)
-            MPI_Barrier(MPI_COMM_WORLD);
+        /* End-of-iteration barrier: prevents writers from starting the next
+         * write before readers finish reading, and also unblocks any writer
+         * Waitall stalled waiting for readers to post their acquire Irecv. */
+        MPI_CHECK(MPI_Barrier(MPI_COMM_WORLD));
     }
 
     MPI_Group_free(&w_group);
