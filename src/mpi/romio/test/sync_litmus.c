@@ -163,12 +163,13 @@ static int t1_run(const char *filename, int sync_mode)
         if (mynod == WRITER)
             write_slot(fh, 0, val);
 
-        /* Sync -- collective operations involve ALL processes;
-         * P1 point-to-point only touches WRITER and READER. */
+        /* Forward sync: guarantees reader sees the write (modes 1 and 2).
+         * Collective operations involve ALL processes; P1 point-to-point
+         * only touches WRITER and READER. */
         switch (sync_mode) {
         case 1: /* sync-barrier-sync: all processes participate */
             MPI_CHECK(MPI_File_sync(fh));
-            MPI_Barrier(MPI_COMM_WORLD);
+            MPI_CHECK(MPI_Barrier(MPI_COMM_WORLD));
             MPI_CHECK(MPI_File_sync(fh));
             break;
         case 2: /* P1: directed sync (point-to-point, only WRITER/READER) */
@@ -177,8 +178,7 @@ static int t1_run(const char *filename, int sync_mode)
             else if (mynod == READER)
                 MPI_CHECK(MPI_File_sync_from(fh, WRITER, MPI_COMM_WORLD));
             break;
-        default: /* no sync -- barrier for iteration pacing */
-            MPI_Barrier(MPI_COMM_WORLD);
+        default: /* no sync: reader may observe stale data (violation expected) */
             break;
         }
 
@@ -189,10 +189,10 @@ static int t1_run(const char *filename, int sync_mode)
                 errs++;
         }
 
-        /* For the no-sync case a second barrier paces iterations so each
-         * reader sees the write from the same iteration, not a later one. */
-        if (sync_mode == 0)
-            MPI_Barrier(MPI_COMM_WORLD);
+        /* End-of-iteration barrier: prevents the writer from starting the
+         * next write before the reader has finished reading the current slot.
+         * Also paces iterations for the no-sync violation test. */
+        MPI_CHECK(MPI_Barrier(MPI_COMM_WORLD));
     }
 
     MPI_CHECK(MPI_File_close(&fh));
