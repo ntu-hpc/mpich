@@ -157,55 +157,40 @@ static int t1_run(const char *filename, int sync_mode)
     fh = open_file(filename, MPI_COMM_WORLD);
 
     for (iter = 1; iter <= N_ITERS; iter++) {
+        int val = (int)(SENTINEL ^ (unsigned)iter);
 
         /* Writer: write a unique sentinel-based value */
-        if (mynod == WRITER) {
-            int val = (int)(SENTINEL ^ (unsigned)iter);
+        if (mynod == WRITER)
             write_slot(fh, 0, val);
 
-            switch (sync_mode) {
-            case 1: /* sync-barrier-sync */
-                MPI_CHECK(MPI_File_sync(fh));
-                MPI_Barrier(MPI_COMM_WORLD);
-                MPI_CHECK(MPI_File_sync(fh));
-                break;
-            case 2: /* P1: directed sync */
+        /* Sync -- collective operations involve ALL processes;
+         * P1 point-to-point only touches WRITER and READER. */
+        switch (sync_mode) {
+        case 1: /* sync-barrier-sync: all processes participate */
+            MPI_CHECK(MPI_File_sync(fh));
+            MPI_Barrier(MPI_COMM_WORLD);
+            MPI_CHECK(MPI_File_sync(fh));
+            break;
+        case 2: /* P1: directed sync (point-to-point, only WRITER/READER) */
+            if (mynod == WRITER)
                 MPI_CHECK(MPI_File_sync_to(fh, READER, MPI_COMM_WORLD));
-                break;
-            default: /* no sync -- signal reader manually */
-                MPI_Barrier(MPI_COMM_WORLD);
-                break;
-            }
+            else if (mynod == READER)
+                MPI_CHECK(MPI_File_sync_from(fh, WRITER, MPI_COMM_WORLD));
+            break;
+        default: /* no sync -- barrier for iteration pacing */
+            MPI_Barrier(MPI_COMM_WORLD);
+            break;
         }
 
-        /* Reader */
+        /* Reader: verify */
         if (mynod == READER) {
-            int expected = (int)(SENTINEL ^ (unsigned)iter);
-            int got;
-
-            switch (sync_mode) {
-            case 1:
-                MPI_CHECK(MPI_File_sync(fh));
-                MPI_Barrier(MPI_COMM_WORLD);
-                MPI_CHECK(MPI_File_sync(fh));
-                break;
-            case 2:
-                MPI_CHECK(MPI_File_sync_from(fh, WRITER, MPI_COMM_WORLD));
-                break;
-            default:
-                MPI_Barrier(MPI_COMM_WORLD);
-                break;
-            }
-
-            got = read_slot(fh, 0);
-            if (got != expected)
+            int got = read_slot(fh, 0);
+            if (got != val)
                 errs++;
         }
 
-        /* For the no-sync case we still need to pace iterations; a second
-         * barrier here is intentional -- we want a single-iteration gap
-         * between write and read to stress the cache, not a race between
-         * consecutive iterations. */
+        /* For the no-sync case a second barrier paces iterations so each
+         * reader sees the write from the same iteration, not a later one. */
         if (sync_mode == 0)
             MPI_Barrier(MPI_COMM_WORLD);
     }
