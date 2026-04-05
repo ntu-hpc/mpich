@@ -604,7 +604,8 @@ def process_func_parameters(func):
 
         do_handle_ptr = 0
         (kind, name) = (p['kind'], p['name'])
-        if '_has_comm' not in func and kind == "COMMUNICATOR" and p['param_direction'] == 'in' and func['name'] != "MPI_File_open":
+        _io_comm_funcs = {"MPI_File_open", "MPI_File_sync_to", "MPI_File_sync_from"}
+        if '_has_comm' not in func and kind == "COMMUNICATOR" and p['param_direction'] == 'in' and func['name'] not in _io_comm_funcs:
             func['_has_comm'] = name
         elif kind == "FILE" and p['param_direction'] == 'in' and func['dir'] == 'io':
             func['_has_file'] = name
