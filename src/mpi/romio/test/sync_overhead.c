@@ -136,7 +136,7 @@ static double *time_sync(SyncCtx *ctx, int iters)
         /* Write to establish dirty state -- NOT timed */
         do_write(ctx->fh);
 
-        /* Timed region -------------------------------------------- */
+        /* Timed region */
         MPI_Barrier(MPI_COMM_WORLD);   /* align start */
         t0 = MPI_Wtime();
 
@@ -155,7 +155,6 @@ static double *time_sync(SyncCtx *ctx, int iters)
             else
                 /* Remaining ranks do nothing -- they are not part of the pair */
                 (void)0;
-            MPI_Barrier(MPI_COMM_WORLD);   /* align end */
             break;
 
         case 2: /* P2 full: sync_group on all nprocs */
@@ -165,13 +164,11 @@ static double *time_sync(SyncCtx *ctx, int iters)
         case 3: /* P2 quarter: sync_group on nprocs/4 */
             if (mynod < nprocs / 4)
                 MPI_CHECK(MPI_File_sync_group(ctx->fh, ctx->g_quarter));
-            MPI_Barrier(MPI_COMM_WORLD);
             break;
 
         case 4: /* P2 half: sync_group on nprocs/2 */
             if (mynod < nprocs / 2)
                 MPI_CHECK(MPI_File_sync_group(ctx->fh, ctx->g_half));
-            MPI_Barrier(MPI_COMM_WORLD);
             break;
 
         case 5: /* P3: release-acquire (first half writers, second half readers) */
@@ -183,7 +180,6 @@ static double *time_sync(SyncCtx *ctx, int iters)
         }
 
         t1 = MPI_Wtime();
-        /* ---------------------------------------------------------- */
 
         elapsed = (t1 - t0) * 1e6;   /* microseconds */
         times[it] = global_max_latency(elapsed);
