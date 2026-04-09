@@ -17,7 +17,12 @@
  *   2. P2 full:    MPI_File_sync_group, G = all nprocs
  *   3. P2 quarter: MPI_File_sync_group, G = nprocs/4 (first quarter)
  *   4. P2 half:    MPI_File_sync_group, G = nprocs/2 (first half)
- *   5. P3: MPI_File_release (first half) / MPI_File_acquire (second half)
+ *   5. P3: MPI_File_release / MPI_File_acquire, fixed 4 writers + 4 readers
+ *          regardless of nprocs (remaining processes are bystanders).
+ *          This is the intended use case: a small subset synchronizes while
+ *          the rest continue unimpeded.  |W|x|R| = 16 messages total,
+ *          flat with N, demonstrating the O(1) cost of Theorem 10 vs the
+ *          baseline's O(log N) barrier that blocks all N processes.
  *
  * Output: CSV to stdout.
  *   nprocs, method, mean_us, stddev_us, min_us, max_us
@@ -122,7 +127,8 @@ typedef struct {
     int method;         /* 0..5 */
     MPI_File fh;
     MPI_Group g_full, g_quarter, g_half;
-    MPI_Group w_group, r_group;
+    MPI_Group w_group, r_group;  /* P3: fixed-size groups */
+    int p3_nw, p3_nr;            /* number of writers / readers in P3 */
 } SyncCtx;
 
 static double *time_sync(SyncCtx *ctx, int iters)
@@ -171,11 +177,14 @@ static double *time_sync(SyncCtx *ctx, int iters)
                 MPI_CHECK(MPI_File_sync_group(ctx->fh, ctx->g_half));
             break;
 
-        case 5: /* P3: release-acquire (first half writers, second half readers) */
-            if (mynod < nprocs / 2)
+        case 5: /* P3: release-acquire, fixed 4w+4r, rest are bystanders.
+                 * Only processes actually IN w_group / r_group participate;
+                 * the condition must match the group membership exactly. */
+            if (mynod < ctx->p3_nw)
                 MPI_CHECK(MPI_File_release(ctx->fh, ctx->w_group, ctx->r_group));
-            else
+            else if (mynod >= nprocs - ctx->p3_nr)
                 MPI_CHECK(MPI_File_acquire(ctx->fh, ctx->w_group, ctx->r_group));
+            /* else: bystander -- not in either group, do nothing */
             break;
         }
 
@@ -270,14 +279,22 @@ int main(int argc, char **argv)
 
     /* Build groups */
     memset(&ctx, 0, sizeof(ctx));
-    ctx.fh       = fh;
-    ctx.g_full   = make_range_group(0, nprocs - 1);
+    ctx.fh        = fh;
+    ctx.g_full    = make_range_group(0, nprocs - 1);
     ctx.g_quarter = (nprocs >= 4) ? make_range_group(0, nprocs / 4 - 1)
                                   : ctx.g_full;
-    ctx.g_half   = (nprocs >= 2) ? make_range_group(0, nprocs / 2 - 1)
-                                 : ctx.g_full;
-    ctx.w_group  = make_range_group(0, nprocs / 2 - 1);
-    ctx.r_group  = make_range_group(nprocs / 2, nprocs - 1);
+    ctx.g_half    = (nprocs >= 2) ? make_range_group(0, nprocs / 2 - 1)
+                                  : ctx.g_full;
+
+    /* P3 uses a fixed group size (4 writers, 4 readers) regardless of nprocs.
+     * Writers = first p3_nw ranks; readers = last p3_nr ranks.
+     * The rest are bystanders and do not participate in any call.
+     * This models the realistic use case where only a small fraction of
+     * processes need to synchronize, exposing the O(|W|x|R|) flat cost. */
+    ctx.p3_nw   = (nprocs >= 8) ? 4 : 1;
+    ctx.p3_nr   = (nprocs >= 8) ? 4 : 1;
+    ctx.w_group = make_range_group(0, ctx.p3_nw - 1);
+    ctx.r_group = make_range_group(nprocs - ctx.p3_nr, nprocs - 1);
 
     memset(wbuf, mynod & 0xFF, sizeof(wbuf));
 
