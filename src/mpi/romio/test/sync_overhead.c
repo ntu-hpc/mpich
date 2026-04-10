@@ -6,8 +6,11 @@
  * consistency primitives (P1, P2, P3).
  *
  * Measures the wall-clock latency of each synchronization mechanism in
- * isolation, across a sweep of process counts.  Data movement (the write
- * and read calls surrounding the sync) is NOT included in the timed region;
+ * isolation, across a sweep of process counts.  Each process writes 1 MiB
+ * to ensure data spans multiple Lustre OSTs; this prevents OST lock contention
+ * from non-participating processes from inflating the P2 subgroup measurements.
+ * Data movement (the write and read calls surrounding the sync) is NOT
+ * included in the timed region;
  * we measure only the synchronization overhead -- the quantity that the
  * formal cost theorems (Theorems 6, 8, 10 in the paper) bound analytically.
  *
@@ -42,7 +45,7 @@
 
 #define DEFAULT_ITERS  500
 #define DEFAULT_WARMUP  50
-#define WRITE_SIZE     4096   /* bytes written per process per iteration */
+#define WRITE_SIZE     (1 << 20)  /* 1 MiB per process -- spreads data across Lustre OSTs */
 
 static int mynod, nprocs;
 
@@ -107,7 +110,7 @@ static double global_max_latency(double local_t)
 /* Write payload to establish dirty_write state before timing sync    */
 /* ------------------------------------------------------------------ */
 
-static char wbuf[WRITE_SIZE];
+static char *wbuf;
 
 static void do_write(MPI_File fh)
 {
@@ -296,7 +299,8 @@ int main(int argc, char **argv)
     ctx.w_group = make_range_group(0, ctx.p3_nw - 1);
     ctx.r_group = make_range_group(nprocs - ctx.p3_nr, nprocs - 1);
 
-    memset(wbuf, mynod & 0xFF, sizeof(wbuf));
+    wbuf = (char *)malloc(WRITE_SIZE);
+    memset(wbuf, mynod & 0xFF, WRITE_SIZE);
 
     /* Warm up (results discarded) */
     for (i = 0; i < 6; i++) {
@@ -326,6 +330,7 @@ int main(int argc, char **argv)
     }
 
     /* Cleanup */
+    free(wbuf);
     MPI_Group_free(&ctx.g_full);
     if (nprocs >= 4 && ctx.g_quarter != ctx.g_full)
         MPI_Group_free(&ctx.g_quarter);
